@@ -90,6 +90,19 @@ PlayerNotesDB = {
 - Tooltips: uses `TooltipDataProcessor` when available and `OnTooltipSetUnit` on older clients (with a check so the note is never added twice).
 - Your own character doesn't get the Create/Read/Edit options.
 
+## Images
+
+<img width="274" height="202" alt="PN tooltip" src="https://github.com/user-attachments/assets/c3821029-c8e5-48b8-a725-9bdebae4d4e5" />
+
+<img width="504" height="523" alt="PN fresh right click" src="https://github.com/user-attachments/assets/cf92bd64-5de4-48af-b81f-357641dbfa6b" />
+
+<img width="580" height="552" alt="PN Create Note" src="https://github.com/user-attachments/assets/db41c8df-2ee3-4b3d-9425-bd7630539f98" />
+
+<img width="572" height="517" alt="PN View Note" src="https://github.com/user-attachments/assets/d524cd0c-3aca-4dcd-b96d-d37080796bd2" />
+
+<img width="978" height="866" alt="PN Menu" src="https://github.com/user-attachments/assets/8434bb73-81bd-48ab-a44a-313c6e132c3a" />
+
+
 ## Changes
 
 **1.2.0**
