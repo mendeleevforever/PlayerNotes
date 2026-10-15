@@ -92,7 +92,7 @@ PlayerNotesDB = {
 
 ## Images
 
-<img width="274" height="202" alt="PN tooltip" src="https://github.com/user-attachments/assets/c3821029-c8e5-48b8-a725-9bdebae4d4e5" />
+<img width="274" height="202" alt="PN tooltip" src="https://github.com/user-attachments/assets/c3821029-c8e5-48b8-a725-9bdebae4d4e5" /><br>
 
 <img width="504" height="523" alt="PN fresh right click" src="https://github.com/user-attachments/assets/cf92bd64-5de4-48af-b81f-357641dbfa6b" />
 
