@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Player Notes
+## Notes: Write notes and coloured Quick Notes about other players, read them from the right-click menu and see them in tooltips
+## Author: Claude
+## Version: 1.2.0
+## SavedVariables: PlayerNotesDB
+
+PlayerNotes.lua
