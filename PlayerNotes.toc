@@ -1,8 +1,15 @@
 ## Interface: 16001
 ## Title: Player Notes
 ## Notes: Write notes and coloured Quick Notes about other players, read them from the right-click menu and see them in tooltips
-## Author: Claude
-## Version: 1.2.0
+## Author: MendeleevForever
+## Version: 1.3.1
+## IconTexture: 134331
 ## SavedVariables: PlayerNotesDB
+## X-Embeds: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
+
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
 
 PlayerNotes.lua

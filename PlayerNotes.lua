@@ -8,7 +8,7 @@
 -- spaces. Names are matched case-insensitively and with extra spaces removed.
 
 local ADDON_NAME = "PlayerNotes"
-local VERSION    = "1.2.0"
+local VERSION    = "1.3.1"
 local PREFIX     = "|cff00ff96Player Notes:|r "
 
 local PN = {}
@@ -94,29 +94,9 @@ end
 -- Name resolution
 -------------------------------------------------------------------------------
 
--- Remove a "-Realm" suffix, but only when it really is a realm name, so a
--- hyphenated last name (e.g. "Anna Smith-Jones") is never cut.
-local function StripRealm(name, server)
-    name = CleanName(name)
-    if not name then return nil end
-    local realms = {}
-    if type(server) == "string" and server ~= "" then realms[#realms + 1] = server end
-    if GetRealmName then realms[#realms + 1] = GetRealmName() end
-    if GetNormalizedRealmName then realms[#realms + 1] = GetNormalizedRealmName() end
-    for _, realm in ipairs(realms) do
-        if type(realm) == "string" and realm ~= "" then
-            local suffix = ("-" .. realm):lower()
-            if #name > #suffix and name:sub(-#suffix):lower() == suffix then
-                return CleanName(name:sub(1, -#suffix - 1))
-            end
-        end
-    end
-    return name
-end
-
--- On WoW Forever, UnitName(unit) returns TWO values: first name and surname
--- (other clients return name and realm). GetUnitName(unit) returns the
--- complete "First Surname" as one string. Use both so the surname is kept.
+-- On WoW Forever, UnitName(unit) returns TWO values: first name and surname.
+-- GetUnitName(unit) returns the complete "First Surname" as one string.
+-- Use both so the surname is kept.
 local function NameFromUnit(unit)
     if not unit or not UnitExists(unit) or not UnitIsPlayer(unit) then return nil end
     local first, surname = UnitName(unit)
@@ -129,11 +109,6 @@ local function NameFromUnit(unit)
     if GetUnitName then
         local full = GetUnitName(unit, false)
         if type(full) == "string" then
-            -- other clients may add a cross-realm marker such as " (*)"
-            if FOREIGN_SERVER_LABEL and FOREIGN_SERVER_LABEL ~= "" then
-                local label = FOREIGN_SERVER_LABEL
-                if full:sub(-#label) == label then full = full:sub(1, -#label - 1) end
-            end
             full = CleanName(full)
             if full and full:lower():find(first:lower(), 1, true) == 1 then return full end
         end
@@ -148,12 +123,73 @@ local function ClassFromUnit(unit)
     return class
 end
 
+-- Faction ("Alliance" / "Horde") of a unit, or nil
+local function FactionFromUnit(unit)
+    if not unit or not UnitFactionGroup or not UnitExists(unit) then return nil end
+    local f = UnitFactionGroup(unit)
+    if f == "Alliance" or f == "Horde" then return f end
+    return nil
+end
+
+-- Faction from a player GUID, via the character's race (for chat names etc.)
+local RACE_FACTION = {
+    Human = "Alliance", Dwarf = "Alliance", NightElf = "Alliance", Gnome = "Alliance",
+    Draenei = "Alliance", Worgen = "Alliance",
+    Orc = "Horde", Scourge = "Horde", Undead = "Horde", Tauren = "Horde", Troll = "Horde",
+    BloodElf = "Horde", Goblin = "Horde",
+}
+local function InfoFromGUID(guid)
+    if type(guid) ~= "string" or not guid:find("^Player%-") or not GetPlayerInfoByGUID then return nil end
+    local ok, _, class, _, race = pcall(GetPlayerInfoByGUID, guid)
+    if not ok then return nil end
+    return class, race and RACE_FACTION[race] or nil
+end
+
+-- Faction icons (the PvP emblems from the target frame)
+local FACTION_TEX = {
+    Alliance = { "Interface\\TargetingFrame\\UI-PVP-Alliance", 0.07, 0.58, 0.06, 0.57 },
+    Horde    = { "Interface\\TargetingFrame\\UI-PVP-Horde",    0.08, 0.58, 0.045, 0.545 },
+}
+local function SetFactionTexture(tex, faction)
+    local t = FACTION_TEX[faction]
+    if t then
+        tex:SetTexture(t[1])
+        tex:SetTexCoord(t[2], t[3], t[4], t[5])
+        tex:Show()
+    else
+        tex:Hide()
+    end
+end
+-- Inline icon for font strings / tooltips ("" when the faction is unknown)
+local function FactionIconString(faction, size)
+    local t = FACTION_TEX[faction]
+    if not t then return "" end
+    size = size or 14
+    return ("|T%s:%d:%d:0:0:64:64:%d:%d:%d:%d|t"):format(t[1], size, size,
+        math.floor(t[2] * 64), math.floor(t[3] * 64), math.floor(t[4] * 64), math.floor(t[5] * 64))
+end
+
+-- The ruleset you are playing on. WoW Forever separates servers by ruleset and
+-- characters only ever meet players of their own ruleset, so notes are kept
+-- separately for each one.
+local function DetectRuleset()
+    local ok, result = pcall(function()
+        if not (C_GameRules and C_GameRules.IsGameRuleActive and Enum and Enum.GameRule) then return nil end
+        local active, rule = C_GameRules.IsGameRuleActive, Enum.GameRule
+        if rule.HardcoreRuleset and active(rule.HardcoreRuleset) then return "Hardcore" end
+        if rule.RPRuleset and active(rule.RPRuleset) then return "RP" end
+        if rule.PvPRuleset and active(rule.PvPRuleset) then return "PvP" end
+        return "PvE"
+    end)
+    return ok and result or "PvE"
+end
+
 local function IsSelf(name)
     local me = NameFromUnit("player")
     return me ~= nil and NameKey(me) == NameKey(name)
 end
 
--- contextData from a right-click menu -> player name, class
+-- contextData from a right-click menu -> player name, class, faction
 local function ResolveContextName(ctx)
     if type(ctx) ~= "table" then return nil end
     local unit = ctx.unit
@@ -162,12 +198,18 @@ local function ResolveContextName(ctx)
         local n = NameFromUnit(unit)
         if n then
             local class = ClassFromUnit(unit)
-            PN:RepairFirstNameNote(n, class)
-            return n, class
+            return n, class, FactionFromUnit(unit)
         end
     end
     if type(ctx.name) == "string" and ctx.name ~= "" then
-        return StripRealm(ctx.name, ctx.server), nil
+        -- chat / friends / guild names: class and faction from the GUID when the menu has one
+        local guid = ctx.guid
+        if not guid and ctx.playerLocation and ctx.playerLocation.GetGUID then
+            local ok, g = pcall(ctx.playerLocation.GetGUID, ctx.playerLocation)
+            if ok then guid = g end
+        end
+        local class, faction = InfoFromGUID(guid)
+        return CleanName(ctx.name), class, faction
     end
     return nil
 end
@@ -276,11 +318,20 @@ function PN:SaveWord(kind, id, text, color)
     return w.id
 end
 
+-- Runs fn(notesTable, ruleset) for the notes of every ruleset (words are shared by all)
+function PN:ForEachNoteTable(fn)
+    for rs, t in pairs(self.db.notesByRuleset or {}) do
+        if type(t) == "table" then fn(t, rs) end
+    end
+end
+
 function PN:CountWordUses(kind, id)
     local n = 0
-    for _, e in pairs(self.db.notes) do
-        if type(e) == "table" and e[kind] == id then n = n + 1 end
-    end
+    self:ForEachNoteTable(function(notes)
+        for _, e in pairs(notes) do
+            if type(e) == "table" and e[kind] == id then n = n + 1 end
+        end
+    end)
     return n
 end
 
@@ -294,12 +345,16 @@ function PN:DeleteWord(kind, id)
             break
         end
     end
-    for key, e in pairs(self.db.notes) do
-        if type(e) == "table" and e[kind] == id then
-            e[kind] = nil
-            if (e.text or "") == "" and not e.adj and not e.noun then self.db.notes[key] = nil end
+    self:ForEachNoteTable(function(notes)
+        local empty = {}
+        for key, e in pairs(notes) do
+            if type(e) == "table" and e[kind] == id then
+                e[kind] = nil
+                if (e.text or "") == "" and not e.adj and not e.noun then empty[#empty + 1] = key end
+            end
         end
-    end
+        for _, key in ipairs(empty) do notes[key] = nil end
+    end)
     self:WordsChanged()
     self:NotesChanged()
     return true
@@ -328,8 +383,8 @@ end
 
 function PN:GetNote(name)
     local key = NameKey(name)
-    if not key or not self.db then return nil end
-    local e = self.db.notes[key]
+    if not key or not self.notes then return nil end
+    local e = self.notes[key]
     if HasContent(e) then
         if type(e.text) ~= "string" then e.text = "" end
         return e, key
@@ -337,10 +392,12 @@ function PN:GetNote(name)
     return nil
 end
 
--- adj / noun are word ids (or nil for none)
-function PN:SetNote(name, text, class, adj, noun)
+-- adj / noun are word ids (or nil for none). class / faction are only
+-- written when known, so an edit never erases them.
+function PN:SetNote(name, text, class, adj, noun, faction)
     name = CleanName(name)
-    if not name or not self.db then return false end
+    if not name or not self.notes then return false end
+    if faction ~= "Alliance" and faction ~= "Horde" then faction = nil end
     text = Trim(text)
     if adj and not self:GetWord("adj", adj) then adj = nil end
     if noun and not self:GetWord("noun", noun) then noun = nil end
@@ -350,13 +407,15 @@ function PN:SetNote(name, text, class, adj, noun)
     end
     local key = NameKey(name)
     local now = time()
-    local e = self.db.notes[key]
+    local e = self.notes[key]
     if type(e) == "table" then
         e.name, e.text, e.adj, e.noun, e.updated = name, text, adj, noun, now
         if class then e.class = class end
+        if faction then e.faction = faction end
         e.created = e.created or now
     else
-        self.db.notes[key] = { name = name, text = text, adj = adj, noun = noun, class = class, created = now, updated = now }
+        self.notes[key] = { name = name, text = text, adj = adj, noun = noun, class = class,
+                            faction = faction, created = now, updated = now }
     end
     self:NotesChanged()
     return true
@@ -364,38 +423,17 @@ end
 
 function PN:DeleteNote(name)
     local key = NameKey(name)
-    if key and self.db and self.db.notes[key] then
-        self.db.notes[key] = nil
+    if key and self.notes and self.notes[key] then
+        self.notes[key] = nil
         self:NotesChanged()
         return true
     end
     return false
 end
 
--- Version 1.0.0 saved notes made from the right-click menu / "/pn target"
--- under the first name only ("Burr" instead of "Burr Duskweaver"). WoW Forever
--- names always have two parts, so when we see the full name and there is no
--- note for it but there is one for the first name alone (and the class matches,
--- if known), move that note to the full name.
-function PN:RepairFirstNameNote(fullName, class)
-    fullName = CleanName(fullName)
-    if not fullName or not self.db or not fullName:find(" ", 1, true) then return end
-    local fullKey = NameKey(fullName)
-    if self.db.notes[fullKey] then return end
-    local firstKey = NameKey(fullName:match("^(%S+)"))
-    local e = firstKey and self.db.notes[firstKey]
-    if type(e) ~= "table" then return end
-    if class and e.class and e.class ~= class then return end
-    self.db.notes[firstKey] = nil
-    e.name = fullName
-    if class then e.class = class end
-    self.db.notes[fullKey] = e
-    self:NotesChanged()
-end
-
 function PN:CountNotes()
     local n = 0
-    for _ in pairs(self.db.notes) do n = n + 1 end
+    for _ in pairs(self.notes or {}) do n = n + 1 end
     return n
 end
 
@@ -403,7 +441,7 @@ end
 function PN:GetSortedNotes(filter)
     local out = {}
     filter = Trim(filter):lower()
-    for key, e in pairs(self.db.notes) do
+    for key, e in pairs(self.notes or {}) do
         if HasContent(e) then
             e.name = e.name or key
             e.text = type(e.text) == "string" and e.text or ""
@@ -465,7 +503,7 @@ StaticPopupDialogs["PLAYERNOTES_CONFIRM_OVERWRITE"] = {
     button1 = YES or "Yes",
     button2 = NO or "No",
     OnAccept = function(self, data)
-        PN:SetNote(data.name, data.text, nil, data.adj, data.noun)
+        PN:SetNote(data.name, data.text, nil, data.adj, data.noun, data.faction)
         PN:ClearAddForm()
         PN:SetAddStatus("|cff66ff66Note about " .. data.name .. " replaced.|r")
     end,
@@ -1178,7 +1216,7 @@ function PN:SaveNoteFromFrame()
         end
         return
     end
-    self:SetNote(f.playerName, text, f.playerClass, adj, noun)
+    self:SetNote(f.playerName, text, f.playerClass, adj, noun, f.playerFaction)
     f.mode = "read"
     self:UpdateNoteFrame()
 end
@@ -1190,7 +1228,9 @@ function PN:UpdateNoteFrame()
     local class = f.playerClass or (entry and entry.class)
 
     if f.mode == "read" and not entry then f.mode = "edit" end
-    SetWindowTitle(f, ColorName(f.playerName, class))
+    local faction = f.playerFaction or (entry and entry.faction)
+    local icon = FactionIconString(faction, 18)
+    SetWindowTitle(f, (icon ~= "" and (icon .. " ") or "") .. ColorName(f.playerName, class))
 
     if f.mode == "read" then
         local info = "Created " .. FormatDate(entry.created)
@@ -1264,13 +1304,18 @@ end
 
 -- Open the note window for a player. mode = "read" or "edit".
 -- Reading a player with no note opens the editor instead.
-function PN:ShowNote(name, mode, class)
+function PN:ShowNote(name, mode, class, faction)
     name = CleanName(name)
     if not name then return end
+    if not self.notes then
+        print(PREFIX .. "Still detecting your ruleset, try again in a moment.")
+        return
+    end
     local f = self:CreateNoteFrame()
     local entry = self:GetNote(name)
-    f.playerName  = name
-    f.playerClass = class or (entry and entry.class)
+    f.playerName    = name
+    f.playerClass   = class or (entry and entry.class)
+    f.playerFaction = faction or (entry and entry.faction)
     f.mode        = (mode == "read" and entry) and "read" or "edit"
     f:Show()
     f:Raise()
@@ -1289,7 +1334,7 @@ local RIGHT_X      = 540                    -- left edge of the right column
 local SCROLL_LEFT  = 20
 local CHILD_W      = LEFT_R - 20 - SCROLL_LEFT
 local ROW_H        = 20
-local LIST_COLS    = { name = { x = 6, w = 140 }, quick = { x = 152, w = 118 }, note = { x = 276 } }
+local LIST_COLS    = { faction = { x = 5 }, name = { x = 24, w = 124 }, quick = { x = 152, w = 118 }, note = { x = 276 } }
 local WORD_ROW_H   = 18
 local WORD_CHILD_W = (OPT_W - 40) - RIGHT_X
 
@@ -1320,7 +1365,7 @@ local function GetListRow(f, i)
     row.edit:SetPoint("RIGHT", row.del, "LEFT", -4, 0)
     row.edit:SetScript("OnClick", function(self)
         local e = self:GetParent().entry
-        PN:ShowNote(e.name, "edit", e.class)
+        PN:ShowNote(e.name, "edit", e.class, e.faction)
     end)
 
     local function Cell(col, font)
@@ -1331,19 +1376,27 @@ local function GetListRow(f, i)
         if fs.SetWordWrap then fs:SetWordWrap(false) end
         return fs
     end
+    row.faction = row:CreateTexture(nil, "ARTWORK")
+    row.faction:SetSize(15, 15)
+    row.faction:SetPoint("LEFT", LIST_COLS.faction.x, 0)
     row.name  = Cell(LIST_COLS.name, "GameFontNormalSmall")
     row.quick = Cell(LIST_COLS.quick, "GameFontNormalSmall")
     row.preview = Cell(LIST_COLS.note, "GameFontHighlightSmall")
     row.preview:SetPoint("RIGHT", row.edit, "LEFT", -8, 0)
     SetColor(row.preview, C.text)
 
-    row:SetScript("OnClick", function(self) PN:ShowNote(self.entry.name, "read", self.entry.class) end)
+    row:SetScript("OnClick", function(self) PN:ShowNote(self.entry.name, "read", self.entry.class, self.entry.faction) end)
     row:SetScript("OnEnter", function(self)
         local e = self.entry
         if not e then return end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         if GameTooltip.SetMinimumWidth then GameTooltip:SetMinimumWidth(260) end
         GameTooltip:AddLine(ColorName(e.name, e.class))
+        if e.faction then
+            GameTooltip:AddLine(FactionIconString(e.faction, 14) .. " " .. e.faction, C.text[1], C.text[2], C.text[3])
+        else
+            GameTooltip:AddLine("Faction unknown (hover the player in game to fill it in)", C.muted[1], C.muted[2], C.muted[3])
+        end
         local quick = PN:QuickNoteText(e)
         if quick then GameTooltip:AddLine(quick) end
         if e.text ~= "" then
@@ -1450,7 +1503,7 @@ function PN:CreateOptions()
     divider:SetPoint("BOTTOMLEFT", (LEFT_R + RIGHT_X) / 2, 56)
 
     ---------------------------------------------------------------- Tooltip
-    AddSection(f, "Tooltip", -46, 20, LEFT_RULE)
+    AddSection(f, "Settings", -46, 20, LEFT_RULE)
 
     local cb = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
     cb:SetSize(22, 22)
@@ -1461,6 +1514,16 @@ function PN:CreateOptions()
     AddHoverTip(cb, "Show notes in player tooltips",
         "When you hover a player you have a note about, their Quick Note and the start of the note are added to the bottom of their tooltip.")
     f.tooltipCheck = cb
+
+    local mm = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+    mm:SetSize(22, 22)
+    mm:SetPoint("TOPLEFT", 290, -70)
+    local mmText = AddLabel(mm, "Show minimap button")
+    mmText:SetPoint("LEFT", mm, "RIGHT", 1, 1)
+    mm:SetScript("OnClick", function(self) PN:SetMinimapShown(self:GetChecked()) end)
+    AddHoverTip(mm, "Show minimap button",
+        "Left-click the button to open Player Notes, right-click to turn tooltip notes on or off. Drag it around the minimap to move it.")
+    f.minimapCheck = mm
 
     local limitLabel = AddLabel(f, "Tooltip character limit")
     limitLabel:SetPoint("TOPLEFT", 26, -102)
@@ -1508,6 +1571,28 @@ function PN:CreateOptions()
     nameBox:SetMaxLetters(60)
     AddPlaceholder(nameBox, "First-name Last-name")
     f.nameBox = nameBox
+
+    -- Faction picker (defaults to your own faction)
+    local function FactionToggle(faction)
+        local b = CreateFrame("Button", nil, f)
+        b:SetSize(22, 22)
+        local bg = b:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetColorTexture(C.field[1], C.field[2], C.field[3], 0.9)
+        AddBorder(b, "BORDER", C.rule, 1, 1, 0)
+        b.sel = AddBorder(b, "OVERLAY", { 1, 0.82, 0 }, 1, 2, -1)
+        b.icon = b:CreateTexture(nil, "ARTWORK")
+        b.icon:SetPoint("TOPLEFT", 3, -3)
+        b.icon:SetPoint("BOTTOMRIGHT", -3, 3)
+        SetFactionTexture(b.icon, faction)
+        b.faction = faction
+        b:SetScript("OnClick", function() PN:SetAddFaction(f.addFaction ~= faction and faction or nil) end)
+        AddHoverTip(b, faction, "This player's faction. Click again to clear it. It is also filled in automatically when you see the player in game.")
+        return b
+    end
+    f.factionButtons = { FactionToggle("Alliance"), FactionToggle("Horde") }
+    f.factionButtons[1]:SetPoint("LEFT", nameBox, "RIGHT", 10, 0)
+    f.factionButtons[2]:SetPoint("LEFT", f.factionButtons[1], "RIGHT", 4, 0)
 
     local quickLabel = AddLabel(f, "Quick Note")
     quickLabel:SetPoint("TOPLEFT", 26, -192)
@@ -1621,6 +1706,7 @@ function PN:CreateOptions()
     end)
 
     self.options = f
+    self:SetAddFaction(FactionFromUnit("player"))   -- default: your own faction
     return f
 end
 
@@ -1652,6 +1738,7 @@ function PN:UpdateOptionsControls()
     if not f then return end
     local s = self.db.settings
     f.tooltipCheck:SetChecked(s.showTooltip)
+    f.minimapCheck:SetChecked(not (self.db.minimap and self.db.minimap.hide))
     if not f.limitBox:HasFocus() then f.limitBox:SetText(tostring(s.tooltipLimit)) end
     for _, w in ipairs(f.limitWidgets) do w:SetAlpha(s.showTooltip and 1 or 0.45) end
 end
@@ -1673,9 +1760,21 @@ function PN:UpdateAddStatus()
     end
 end
 
+function PN:SetAddFaction(faction)
+    local f = self.options
+    if not f then return end
+    f.addFaction = faction
+    for _, b in ipairs(f.factionButtons) do
+        local on = b.faction == faction
+        for _, t in ipairs(b.sel) do if on then t:Show() else t:Hide() end end
+        b.icon:SetAlpha(on and 1 or 0.35)
+    end
+end
+
 function PN:ClearAddForm()
     local f = self.options
     if not f then return end
+    self:SetAddFaction(FactionFromUnit("player"))
     f.nameBox:SetText("")
     f.noteBox:SetText("")
     f.addAdjDD:SetValue(nil)
@@ -1689,6 +1788,10 @@ function PN:SaveFromAddForm()
     local name = CleanName(f.nameBox:GetText())
     local text = Trim(f.noteBox:GetText())
     local adj, noun = f.addAdjDD.value, f.addNounDD.value
+    if not self.notes then
+        self:SetAddStatus("|cffff6655Still detecting your ruleset, try again in a moment.|r")
+        return
+    end
     if not name then
         self:SetAddStatus("|cffff6655Enter a player name.|r")
         f.nameBox:SetFocus()
@@ -1702,10 +1805,10 @@ function PN:SaveFromAddForm()
     local existing = self:GetNote(name)
     if existing then
         StaticPopup_Show("PLAYERNOTES_CONFIRM_OVERWRITE", existing.name, nil,
-            { name = name, text = text, adj = adj, noun = noun })
+            { name = name, text = text, adj = adj, noun = noun, faction = f.addFaction })
         return
     end
-    self:SetNote(name, text, nil, adj, noun)
+    self:SetNote(name, text, nil, adj, noun, f.addFaction)
     self:ClearAddForm()
     self:SetAddStatus("|cff66ff66Saved note about " .. name .. ".|r")
 end
@@ -1716,17 +1819,23 @@ function PN:RefreshList()
     local data = self:GetSortedNotes(f.search:GetText())
     local total = self:CountNotes()
 
+    local rs = self.ruleset or "?"
     if #data ~= total then
-        f.listHeader:SetText(("Saved Notes  |cffa8987a(%d of %d)|r"):format(#data, total))
+        f.listHeader:SetText(("Saved Notes  |cffa8987a%s ruleset  (%d of %d)|r"):format(rs, #data, total))
     else
-        f.listHeader:SetText(("Saved Notes  |cffa8987a(%d)|r"):format(total))
+        f.listHeader:SetText(("Saved Notes  |cffa8987a%s ruleset  (%d)|r"):format(rs, total))
     end
-    f.info:SetText(("%d %s saved"):format(total, total == 1 and "note" or "notes") .. DOT
-        .. "Tooltip notes " .. (self.db.settings.showTooltip and "|cff66ff66on|r" or "|cffff6655off|r"))
+    if self.notes then
+        f.info:SetText(("%s ruleset"):format(rs) .. DOT .. ("%d %s"):format(total, total == 1 and "note" or "notes") .. DOT
+            .. "Tooltip notes " .. (self.db.settings.showTooltip and "|cff66ff66on|r" or "|cffff6655off|r"))
+    else
+        f.info:SetText("Detecting your ruleset...")
+    end
 
     for i, e in ipairs(data) do
         local row = GetListRow(f, i)
         row.entry = e
+        SetFactionTexture(row.faction, e.faction)
         row.name:SetText(ColorName(e.name, e.class))
         row.quick:SetText(self:QuickNoteText(e) or "|cff7d705a—|r")
         row.preview:SetText(ForDisplay((e.text:gsub("%s+", " "))))
@@ -1740,7 +1849,7 @@ function PN:RefreshList()
     if f.scroll.UpdateScrollChildRect then f.scroll:UpdateScrollChildRect() end
 
     if total == 0 then
-        f.empty:SetText("No notes yet.\nRight-click a player, or add one above.")
+        f.empty:SetText(("No notes for the %s ruleset yet.\nRight-click a player, or add one above."):format(rs))
     elseif #data == 0 then
         f.empty:SetText("No notes match your search.")
     else
@@ -1808,17 +1917,18 @@ local MODERN_MENU_TAGS = {
 
 local function AddModernMenuItems(owner, root, ctx)
     if not PN.db or not root then return end
-    local name, class = ResolveContextName(ctx)
+    if not PN.notes then return end
+    local name, class, faction = ResolveContextName(ctx)
     if not name or IsSelf(name) then return end
     local hasNote = PN:GetNote(name) ~= nil
 
     if root.CreateDivider then root:CreateDivider() end
     if root.CreateTitle then root:CreateTitle(MENU_TITLE) end
     if hasNote then
-        root:CreateButton("Read Note", function() PN:ShowNote(name, "read", class) end)
-        root:CreateButton("Edit Note", function() PN:ShowNote(name, "edit", class) end)
+        root:CreateButton("Read Note", function() PN:ShowNote(name, "read", class, faction) end)
+        root:CreateButton("Edit Note", function() PN:ShowNote(name, "edit", class, faction) end)
     else
-        root:CreateButton("Create Note", function() PN:ShowNote(name, "edit", class) end)
+        root:CreateButton("Create Note", function() PN:ShowNote(name, "edit", class, faction) end)
     end
 end
 
@@ -1836,9 +1946,9 @@ local function AddLegacyMenuItems(dropdownMenu, which, unit, name)
     local ctx = {
         unit   = unit or (dropdownMenu and dropdownMenu.unit),
         name   = name or (dropdownMenu and dropdownMenu.name),
-        server = dropdownMenu and dropdownMenu.server,
     }
-    local pname, class = ResolveContextName(ctx)
+    if not PN.notes then return end
+    local pname, class, faction = ResolveContextName(ctx)
     if not pname or IsSelf(pname) then return end
     local hasNote = PN:GetNote(pname) ~= nil
 
@@ -1851,7 +1961,7 @@ local function AddLegacyMenuItems(dropdownMenu, which, unit, name)
         b.text, b.notCheckable = text, true
         b.func = function()
             CloseDropDownMenus()
-            PN:ShowNote(pname, mode, class)
+            PN:ShowNote(pname, mode, class, faction)
         end
         UIDropDownMenu_AddButton(b, 1)
     end
@@ -1903,29 +2013,30 @@ local function AddNoteToTooltip(tooltip, data)
     if not PN.db or not PN.db.settings.showTooltip then return end
     if not tooltip or (tooltip.IsForbidden and tooltip:IsForbidden()) or not tooltip.GetUnit then return end
 
-    local name, class
+    if not PN.notes then return end
+    local name, class, faction
     local _, unit = tooltip:GetUnit()
     if unit then
         if not UnitIsPlayer(unit) then return end
-        name, class = NameFromUnit(unit), ClassFromUnit(unit)
+        name, class, faction = NameFromUnit(unit), ClassFromUnit(unit), FactionFromUnit(unit)
     elseif type(data) == "table" and type(data.guid) == "string" and data.guid:find("^Player%-") and GetPlayerInfoByGUID then
         local _, cls, _, _, _, n, second = GetPlayerInfoByGUID(data.guid)
-        if type(n) == "string" and type(second) == "string" and second ~= ""
-            and second ~= (GetRealmName and GetRealmName())
-            and second ~= (GetNormalizedRealmName and GetNormalizedRealmName()) then
-            n = n .. " " .. second        -- Forever: surname, not realm
+        if type(n) == "string" and type(second) == "string" and second ~= "" then
+            n = n .. " " .. second        -- Forever: the second value is the surname
         end
         name, class = CleanName(n), cls
+        local _, fac = InfoFromGUID(data.guid)
+        faction = fac
     end
     if not name then return end
 
-    PN:RepairFirstNameNote(name, class)
     local entry = PN:GetNote(name)
     if not entry or TooltipHasNote(tooltip) then return end
 
-    -- Keep the stored spelling and class in sync with what the game reports
+    -- Keep the stored spelling, class and faction in sync with what the game reports
     entry.name = name
     if class then entry.class = class end
+    if faction then entry.faction = faction end
 
     -- "Note: Good Tank - first 50 characters..." (limit applies to the written note)
     local text = Trim((entry.text:gsub("%s+", " ")))
@@ -1967,6 +2078,7 @@ SlashCmdList["PLAYERNOTES"] = function(msg)
         print("  /pn target           Read or create a note for your target")
         print("  /pn First Last       Read or create a note for that player")
         print("  /pn tooltip          Turn tooltip notes on/off")
+        print("  /pn minimap          Show/hide the minimap button")
         print("  /pn limit <number>   Set the tooltip character limit (" .. MIN_LIMIT .. "-" .. MAX_LIMIT .. ")")
         print("  Right-click a player for Create Note / Read Note / Edit Note.")
     elseif lower == "target" then
@@ -1975,9 +2087,11 @@ SlashCmdList["PLAYERNOTES"] = function(msg)
             print(PREFIX .. "Target a player first.")
         else
             local class = ClassFromUnit("target")
-            PN:RepairFirstNameNote(name, class)
-            PN:ShowNote(name, "read", class)
+            PN:ShowNote(name, "read", class, FactionFromUnit("target"))
         end
+    elseif lower == "minimap" then
+        PN:SetMinimapShown(PN.db.minimap.hide)
+        print(PREFIX .. "Minimap button " .. (PN.db.minimap.hide and "hidden" or "shown") .. ".")
     elseif lower == "tooltip" then
         PN:SetTooltipEnabled(not PN.db.settings.showTooltip)
         print(PREFIX .. "Tooltip notes " .. (PN.db.settings.showTooltip and "|cff66ff66on|r" or "|cffff4040off|r") .. ".")
@@ -1986,7 +2100,12 @@ SlashCmdList["PLAYERNOTES"] = function(msg)
         if n then PN:SetTooltipLimit(n) end
         print(PREFIX .. "Tooltip character limit: " .. PN.db.settings.tooltipLimit .. ".")
     elseif lower == "debug" then
-        print(PREFIX .. "v" .. VERSION .. "  •  notes: " .. PN:CountNotes()
+        local per = {}
+        PN:ForEachNoteTable(function(t, rs) local n = 0; for _ in pairs(t) do n = n + 1 end; per[#per + 1] = rs .. " " .. n end)
+        print(PREFIX .. "v" .. VERSION .. "  •  ruleset: " .. tostring(PN.ruleset) .. " (detected " .. DetectRuleset() .. ")"
+            .. "  •  faction: " .. tostring(FactionFromUnit("player"))
+            .. "  •  notes per ruleset: " .. (#per > 0 and table.concat(per, ", ") or "none"))
+        print(PREFIX .. "notes: " .. PN:CountNotes()
             .. "  •  menus: " .. tostring(PN.menuSystem)
             .. "  •  tooltip hook: " .. ((TooltipDataProcessor and "TooltipDataProcessor") or "OnTooltipSetUnit"))
     else
@@ -2000,7 +2119,8 @@ end
 local function InitDB()
     PlayerNotesDB = type(PlayerNotesDB) == "table" and PlayerNotesDB or {}
     local db = PlayerNotesDB
-    db.notes     = type(db.notes) == "table" and db.notes or {}
+    db.notesByRuleset = type(db.notesByRuleset) == "table" and db.notesByRuleset or {}
+    db.minimap   = type(db.minimap) == "table" and db.minimap or {}
     db.settings  = type(db.settings) == "table" and db.settings or {}
     db.positions = type(db.positions) == "table" and db.positions or {}
     for k, v in pairs(DEFAULT_SETTINGS) do
@@ -2035,10 +2155,14 @@ local function InitDB()
         db.words[listKey] = list
     end
 
-    -- Drop empty notes and re-key any saved under a non-normalized key
-    -- (changes are collected first: a table must not gain keys while it is traversed)
+    PN.db = db
+end
+
+-- Drops empty notes and re-keys any saved under a non-normalized key
+-- (changes are collected first: a table must not gain keys while it is traversed)
+local function CleanNotes(notes)
     local remove, move = {}, {}
-    for key, e in pairs(db.notes) do
+    for key, e in pairs(notes) do
         if type(e) ~= "table" then
             remove[#remove + 1] = key
         else
@@ -2052,17 +2176,82 @@ local function InitDB()
             end
         end
     end
-    for _, key in ipairs(remove) do db.notes[key] = nil end
+    for _, key in ipairs(remove) do notes[key] = nil end
     for _, m in ipairs(move) do
-        if not db.notes[m[2]] then db.notes[m[2]] = db.notes[m[1]] end
-        db.notes[m[1]] = nil
+        if not notes[m[2]] then notes[m[2]] = notes[m[1]] end
+        notes[m[1]] = nil
     end
-    PN.db = db
+end
+
+-- Points the addon at the notes of the given ruleset.
+function PN:SetRuleset(rs)
+    local db = self.db
+    local byRs = db.notesByRuleset
+    byRs[rs] = type(byRs[rs]) == "table" and byRs[rs] or {}
+    local target = byRs[rs]
+    CleanNotes(target)
+
+    local changed = self.ruleset ~= rs
+    self.ruleset, self.notes = rs, target
+    if changed then
+        if self.noteFrame and self.noteFrame:IsShown() then self.noteFrame:Hide() end
+        if self.options and self.options:IsShown() then self:RefreshList(); self:RefreshWordLists() end
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Minimap button (LibDataBroker + LibDBIcon, embedded in Libs\)
+-------------------------------------------------------------------------------
+function PN:SetupMinimapButton()
+    local LDB = LibStub and LibStub("LibDataBroker-1.1", true)
+    local DBI = LibStub and LibStub("LibDBIcon-1.0", true)
+    if not LDB or not DBI then return end
+    local obj = LDB:NewDataObject(ADDON_NAME, {
+        type = "launcher",
+        text = "Player Notes",
+        icon = 134331,
+        OnClick = function(_, button)
+            if button == "RightButton" then
+                PN:SetTooltipEnabled(not PN.db.settings.showTooltip)
+                print(PREFIX .. "Tooltip notes " .. (PN.db.settings.showTooltip and "|cff66ff66on|r" or "|cffff4040off|r") .. ".")
+            else
+                PN:ToggleOptions()
+            end
+        end,
+        OnTooltipShow = function(tt)
+            tt:AddLine("Player Notes", 1, 0.82, 0)
+            local faction = FactionFromUnit("player")
+            tt:AddLine(("%s%s ruleset  •  %d %s"):format(
+                faction and (FactionIconString(faction, 14) .. " ") or "", PN.ruleset or "?",
+                PN:CountNotes(), PN:CountNotes() == 1 and "note" or "notes"), 0.9, 0.84, 0.68)
+            tt:AddLine(" ")
+            tt:AddLine("|cffffd100Left-click|r  open Player Notes", 1, 1, 1)
+            tt:AddLine("|cffffd100Right-click|r  tooltip notes " .. (PN.db.settings.showTooltip and "on → off" or "off → on"), 1, 1, 1)
+        end,
+    })
+    if not obj then return end
+    DBI:Register(ADDON_NAME, obj, self.db.minimap)
+    self.dbicon = DBI
+end
+
+function PN:SetMinimapShown(show)
+    self.db.minimap.hide = not show
+    if self.dbicon then
+        if show then self.dbicon:Show(ADDON_NAME) else self.dbicon:Hide(ADDON_NAME) end
+    end
+    self:UpdateOptionsControls()
 end
 
 local events = CreateFrame("Frame")
 events:RegisterEvent("ADDON_LOADED")
 events:RegisterEvent("PLAYER_LOGIN")
+events:RegisterEvent("PLAYER_ENTERING_WORLD")
+
+local function ApplyRuleset()
+    local ok, err = pcall(function() PN:SetRuleset(DetectRuleset()) end)
+    if not ok then print(PREFIX .. "|cffff4040ruleset error:|r " .. tostring(err)) end
+end
+
 events:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 ~= ADDON_NAME then return end
@@ -2073,8 +2262,13 @@ events:SetScript("OnEvent", function(self, event, arg1)
             PN:HookMenus()
             PN:HookTooltips()
             PN:RegisterBlizzardOptions()
+            PN:SetupMinimapButton()
         end)
         if not ok then print(PREFIX .. "|cffff4040load error:|r " .. tostring(err)) end
         print(("|cff00ff96Player Notes %s|r loaded  —  /pn for options, right-click a player to add a note"):format(VERSION))
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Wait a moment after loading in so the game rules are certainly known,
+        -- then check again on every loading screen (cheap).
+        if C_Timer and C_Timer.After then C_Timer.After(1, ApplyRuleset) else ApplyRuleset() end
     end
 end)
